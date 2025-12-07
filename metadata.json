@@ -1,0 +1,9 @@
+{
+  "name": "LE MONDE À VOUS 2 ",
+  "description": "Plateforme Universelle d'Assistants IA Spécialisés, Réseau Social et Éducation Mondiale.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "geolocation"
+  ]
+}
