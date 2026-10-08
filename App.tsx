@@ -5,8 +5,9 @@ import { SocialFeed } from './components/SocialFeed';
 import { MokSchool } from './components/MokSchool';
 import { AdminDashboard } from './components/AdminDashboard';
 import { AuthPage } from './components/AuthPage';
+import { CallsHub } from './components/calls/CallsHub';
 import { AppView, UserProfile } from './types';
-import { MessageSquare, Users, GraduationCap, Menu, ShieldCheck, LogOut, CreditCard, X, Check, Zap, Home, Smartphone, QrCode, Copy, Loader2 } from 'lucide-react';
+import { MessageSquare, Users, GraduationCap, Menu, ShieldCheck, LogOut, CreditCard, X, Check, Zap, Home, Smartphone, QrCode, Copy, Loader2, PhoneCall } from 'lucide-react';
 
 const App: React.FC = () => {
   // Auth State
@@ -14,7 +15,9 @@ const App: React.FC = () => {
     return !!localStorage.getItem('mok_auth_token');
   });
 
-  const [currentView, setCurrentView] = useState<AppView>(AppView.ASSISTANTS);
+  // ?view=calls ouvre directement les appels (lien d'invitation, démonstration multi-onglets).
+  const [currentView, setCurrentView] = useState<AppView>(() =>
+    new URLSearchParams(window.location.search).get('view') === 'calls' ? AppView.CALLS : AppView.ASSISTANTS);
   const [showShop, setShowShop] = useState(false);
   
   // Payment State
@@ -115,6 +118,12 @@ const App: React.FC = () => {
             label="Assistants IA" 
           />
           <NavButton 
+            active={currentView === AppView.CALLS} 
+            onClick={() => setCurrentView(AppView.CALLS)} 
+            icon={<PhoneCall size={22}/>} 
+            label="Appels de groupe" 
+          />
+          <NavButton 
             active={currentView === AppView.SOCIAL} 
             onClick={() => setCurrentView(AppView.SOCIAL)} 
             icon={<Users size={22}/>} 
@@ -189,8 +198,13 @@ const App: React.FC = () => {
               <DialloAssistants 
                   userCredits={userCredits} 
                   deductCredits={deductCredits} 
+                  onOpenGroupCall={() => setCurrentView(AppView.CALLS)}
               />
           )}
+          {/* Toujours monté : changer de vue ne raccroche pas et les invitations arrivent partout. */}
+          <div className={currentView === AppView.CALLS ? 'h-full' : 'hidden'}>
+              <CallsHub visible={currentView === AppView.CALLS} onOpen={() => setCurrentView(AppView.CALLS)} />
+          </div>
           {currentView === AppView.SOCIAL && <SocialFeed />}
           {currentView === AppView.SCHOOL && (
               <MokSchool 
@@ -209,6 +223,12 @@ const App: React.FC = () => {
             onClick={() => setCurrentView(AppView.ASSISTANTS)} 
             icon={<MessageSquare size={24} strokeWidth={active => active ? 2.5 : 2} />} 
             label="Chat"
+        />
+        <MobileNavButton 
+            active={currentView === AppView.CALLS} 
+            onClick={() => setCurrentView(AppView.CALLS)} 
+            icon={<PhoneCall size={24} />} 
+            label="Appels"
         />
         <MobileNavButton 
             active={currentView === AppView.SOCIAL} 

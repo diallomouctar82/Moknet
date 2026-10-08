@@ -1,5 +1,5 @@
 
-import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
+import { GoogleGenAI, LiveServerMessage, Modality, Type } from "@google/genai";
 import { ExpertType, VoiceModel } from '../types';
 
 const apiKey = process.env.API_KEY || '';
@@ -12,10 +12,33 @@ const defaultAi = new GoogleGenAI({ apiKey });
 export const BASE_INSTRUCTION = `
 Tu ne dois JAMAIS, sous AUCUN prétexte, te présenter comme une IA, un robot ou un programme.
 Tu es TOUJOURS un expert humain professionnel de la famille DIALLO.
-Réponds en FRANÇAIS par défaut. Utilise des emojis 🎯 pour structurer.
-Format de réponse: 1. ANALYSE 2. SOLUTION 3. DÉMARCHES 4. POINTS D'ATTENTION 5. ACTIONS IMMÉDIATES.
+Réponds dans la langue de ton interlocuteur (voir POLITIQUE DE LANGUE). Utilise des emojis 🎯 pour structurer.
+Format de réponse : 1. Analyse 2. Solution 3. Démarches 4. Points d'attention 5. Actions immédiates — titres traduits dans la langue de la réponse.
 Sois bienveillant, professionnel et concis.
 `;
+
+/**
+ * Politique de langue ajoutée à TOUTES les consignes d'experts, y compris
+ * celles personnalisées par un administrateur : elle ne peut pas être supprimée.
+ */
+export const LANGUAGE_POLICY = `
+POLITIQUE DE LANGUE / LANGUAGE POLICY (prioritaire) :
+- Réponds toujours dans la langue de ton interlocuteur. Always answer in the language the user writes or speaks in.
+- Si le message contient un marqueur [Langue: X], réponds en X, titres compris. If the message contains [Langue: X], answer in X.
+- Le français n'est utilisé que si la langue de l'interlocuteur est inconnue.
+- Pour le wolof, le pulaar, le malinké ou le lingala : réponds dans cette langue au mieux, indique en une phrase que la traduction peut être imparfaite, et propose de reformuler en français ou en anglais.
+`;
+
+/** Profils des experts : domaine et garde-fous, partagés entre le chat et les appels de groupe. */
+export const EXPERT_PROFILES: Record<ExpertType, { title: string; domain: string; guardrails: string }> = {
+  [ExpertType.DIALLO]: { title: 'DIALLO', domain: 'expert en communication, langues et culture générale', guardrails: '' },
+  [ExpertType.MAITRE]: { title: 'MAÎTRE DIALLO', domain: 'expert juridique international (droit, immigration, famille)', guardrails: 'Rappelle toujours que tes conseils ne remplacent pas un avocat au tribunal.' },
+  [ExpertType.DOCTEUR]: { title: 'DOCTEUR DIALLO', domain: 'expert santé et bien-être, orienté prévention', guardrails: 'Ne pose jamais de diagnostic médical définitif et renvoie vers un médecin ou les urgences (15, 112) en cas d\'urgence.' },
+  [ExpertType.PROFESSEUR]: { title: 'PROFESSEUR DIALLO', domain: 'expert éducation et pédagogie (devoirs, orientation, apprentissage)', guardrails: 'Pédagogue et patient.' },
+  [ExpertType.CONSEILLER]: { title: 'CONSEILLER DIALLO', domain: 'expert emploi, carrière et entrepreneuriat (CV, entretiens, business)', guardrails: '' },
+  [ExpertType.MONSIEUR]: { title: 'MONSIEUR DIALLO', domain: 'expert logement (recherche, aides au logement, droits des locataires, travaux)', guardrails: 'Renvoie vers les services sociaux ou un professionnel agréé pour les démarches engageantes.' },
+  [ExpertType.GUIDE]: { title: 'GUIDE DIALLO', domain: 'expert voyage et mobilité (visas, vols, itinéraires)', guardrails: 'Rappelle que les conditions de visa doivent être vérifiées auprès du consulat.' },
+};
 
 // Helper to get overrides from localStorage
 const getPromptOverride = (expert: ExpertType): string | null => {
@@ -32,24 +55,40 @@ export const resetSystemInstruction = (expert: ExpertType) => {
     localStorage.removeItem(`mok_prompt_${expert}`);
 };
 
-const getSystemInstruction = (expert: ExpertType): string => {
+export const getSystemInstruction = (expert: ExpertType): string => {
   const override = getPromptOverride(expert);
-  if (override) return override;
+  if (override) return `${override}\n${LANGUAGE_POLICY}`;
+  const p = EXPERT_PROFILES[expert] ?? EXPERT_PROFILES[ExpertType.DIALLO];
+  return `${BASE_INSTRUCTION} Tu es ${p.title}, ${p.domain}. ${p.guardrails}\n${LANGUAGE_POLICY}`;
+};
 
-  switch (expert) {
-    case ExpertType.MAITRE:
-      return `${BASE_INSTRUCTION} Tu es MAÎTRE DIALLO, expert juridique international (Droit, Immigration, Famille). Rappelle toujours que tes conseils ne remplacent pas un avocat au tribunal.`;
-    case ExpertType.DOCTEUR:
-      return `${BASE_INSTRUCTION} Tu es DOCTEUR DIALLO, expert santé et bien-être. Tu fais de la prévention. Ne pose jamais de diagnostic médical définitif et renvoie vers un médecin en cas d'urgence (15, 112).`;
-    case ExpertType.PROFESSEUR:
-      return `${BASE_INSTRUCTION} Tu es PROFESSEUR DIALLO, expert éducation et pédagogie. Tu aides pour les devoirs, l'orientation et l'apprentissage. Pédagogue et patient.`;
-    case ExpertType.GUIDE:
-      return `${BASE_INSTRUCTION} Tu es GUIDE DIALLO, expert voyage et mobilité. Visas, vols, itinéraires.`;
-    case ExpertType.CONSEILLER:
-      return `${BASE_INSTRUCTION} Tu es CONSEILLER DIALLO, expert emploi et carrière. CV, entretiens, business.`;
-    default:
-      return `${BASE_INSTRUCTION} Tu es DIALLO, expert en communication et culture générale.`;
-  }
+export type MeetingExpertRole = 'ADVISOR' | 'NOTE_TAKER' | 'LIVE_RECAP';
+
+const MEETING_ROLE_RULES: Record<MeetingExpertRole, string> = {
+  ADVISOR: `RÔLE : CONSEILLER. Tu ne prends la parole que lorsqu'un participant t'adresse une question.
+Réponds en 2 à 4 phrases, de façon neutre envers tous les participants, sans interrompre la discussion.`,
+  NOTE_TAKER: `RÔLE : PRENEUR DE NOTES. Tu ne parles jamais aux participants.
+Tu relèves uniquement les décisions explicitement prises et les actions explicitement attribuées dans la transcription.
+N'ajoute rien qui n'a pas été dit. Si le responsable ou l'échéance n'ont pas été dits, laisse-les vides.`,
+  LIVE_RECAP: `RÔLE : RÉCAP EN DIRECT. Tu ne parles jamais aux participants.
+Tu rédiges un récapitulatif factuel de la discussion en 3 à 6 puces courtes, sans opinion.`,
+};
+
+/**
+ * Consignes d'un expert invité dans un appel de groupe. Contrairement au chat
+ * individuel, l'expert y est toujours présenté comme une IA : plusieurs
+ * personnes qui ne l'ont pas choisi l'entendent, et la prise de notes exige
+ * un consentement éclairé.
+ */
+export const buildMeetingExpertInstruction = (expert: ExpertType, role: MeetingExpertRole, outputLanguage: string): string => {
+  const p = EXPERT_PROFILES[expert] ?? EXPERT_PROFILES[ExpertType.DIALLO];
+  return `Tu es ${p.title}, ${p.domain}, expert IA de MokNet invité dans un appel de groupe entre plusieurs personnes qui peuvent parler des langues différentes.
+TRANSPARENCE : les participants savent que tu es un expert IA. Ne prétends jamais être un humain.
+${MEETING_ROLE_RULES[role]}
+LANGUE DE SORTIE : écris en ${outputLanguage}. Write your output in ${outputLanguage}.
+FIABILITÉ : n'invente aucun fait, chiffre ni engagement. Signale explicitement toute information incertaine (« à vérifier »).
+Ne fais pas de calcul toi-même : recopie les chiffres tels qu'ils ont été dits, le logiciel MokNet vérifie les calculs.
+${p.guardrails}`;
 };
 
 // --- VOICE MODEL MANAGEMENT (SIMULATION) ---
@@ -304,7 +343,8 @@ export const generateImage = async (prompt: string, size: '1K' | '2K' | '4K' = '
 export const connectLiveSession = async (
   expert: ExpertType,
   onAudioData: (base64: string) => void,
-  onClose: () => void
+  onClose: () => void,
+  languageName?: string
 ) => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
   const inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
@@ -328,6 +368,7 @@ export const connectLiveSession = async (
     - Ne fais pas de longues listes. Pose des questions.
     - Adopte un ton chaleureux et naturel, adapté à ton personnage (${expert}).
     - Ne décris pas tes actions (ex: *sourit*), parle simplement.
+    - Parle dans la langue de ton interlocuteur${languageName ? ` (langue choisie : ${languageName})` : ''} ; s'il change de langue, suis-le.
   `;
 
   try {
@@ -420,3 +461,82 @@ export async function decodeAudioData(base64: string, ctx: AudioContext) {
   }
   return buffer;
 }
+
+
+// --- APPELS DE GROUPE : TRADUCTION ET EXPERTS ---
+
+export const hasGeminiKey = (): boolean => !!process.env.API_KEY;
+
+/** Traduction d'une intervention ou d'un élément de l'espace partagé. */
+export const translateText = async (text: string, fromLanguage: string, toLanguage: string, signal?: AbortSignal): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: `Translate the following text from ${fromLanguage} to ${toLanguage}.
+Output only the translation, without quotes or comments. Keep names, numbers, amounts and dates exactly as written.
+
+${text}`,
+    config: { temperature: 0, abortSignal: signal },
+  });
+  return (response.text || '').trim();
+};
+
+/** Réponse d'un expert conseiller sollicité pendant un appel. */
+export const meetingExpertAnswer = async (
+  expert: ExpertType, outputLanguage: string, question: string, transcript: Array<{ speaker: string; text: string }>,
+): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+  const context = transcript.length
+    ? `Transcription consentie de l'appel :\n${transcript.slice(-30).map(l => `${l.speaker}: ${l.text}`).join('\n')}\n\n`
+    : '';
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: `${context}Question : ${question}`,
+    config: { systemInstruction: buildMeetingExpertInstruction(expert, 'ADVISOR', outputLanguage) },
+  });
+  return (response.text || '').trim();
+};
+
+/** Extraction des décisions et actions (preneur de notes), au format JSON. */
+export const meetingExpertNotes = async (
+  expert: ExpertType, outputLanguage: string, transcript: Array<{ speaker: string; text: string }>,
+): Promise<Array<{ section: 'decisions' | 'actions'; text: string; owner?: string; due?: string }>> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: `Transcription consentie :\n${transcript.slice(-60).map(l => `${l.speaker}: ${l.text}`).join('\n')}`,
+    config: {
+      systemInstruction: buildMeetingExpertInstruction(expert, 'NOTE_TAKER', outputLanguage),
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            section: { type: Type.STRING, enum: ['decisions', 'actions'] },
+            text: { type: Type.STRING },
+            owner: { type: Type.STRING },
+            due: { type: Type.STRING },
+          },
+          required: ['section', 'text'],
+        },
+      },
+    },
+  });
+  const parsed = JSON.parse(response.text || '[]');
+  if (!Array.isArray(parsed)) throw new Error('Réponse de notes invalide');
+  return parsed.filter((n: any) => (n.section === 'decisions' || n.section === 'actions') && typeof n.text === 'string');
+};
+
+/** Récapitulatif en direct (rôle LIVE_RECAP). */
+export const meetingExpertRecap = async (
+  expert: ExpertType, outputLanguage: string, transcript: Array<{ speaker: string; text: string }>,
+): Promise<string> => {
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: `Transcription consentie :\n${transcript.slice(-60).map(l => `${l.speaker}: ${l.text}`).join('\n')}`,
+    config: { systemInstruction: buildMeetingExpertInstruction(expert, 'LIVE_RECAP', outputLanguage) },
+  });
+  return (response.text || '').trim();
+};

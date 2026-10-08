@@ -312,6 +312,9 @@ export const AdminDashboard: React.FC = () => {
                           onChange={(e) => setAgentPrompt(e.target.value)}
                           className="w-full h-64 p-4 border border-slate-200 rounded-xl bg-slate-50 text-sm font-mono text-slate-700 outline-none focus:border-brand-accent resize-none"
                       />
+                      <p className="text-xs text-slate-500 mt-2">
+                          La politique de langue (réponse dans la langue de l'interlocuteur) est ajoutée automatiquement à ces instructions et ne peut pas être supprimée.
+                      </p>
                   </div>
                   
                   <div className="flex justify-end gap-3">
