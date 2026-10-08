@@ -49,6 +49,8 @@ export class MeetingClient {
   private router: TranslationRouter;
   private ctx: CoreCtx;
   public lastError: string | null = null;
+  /** Un autre onglet utilise la même identité : les deux se croiraient hôtes du même appel. */
+  public duplicateIdentity = false;
 
   constructor(private deps: ClientDeps) {
     this.me = deps.me;
@@ -105,7 +107,7 @@ export class MeetingClient {
     });
     this.meetings.set(id, state);
     this.deps.store.ensure(state.conversationId, state.title, [this.me.id], this.ctx.now());
-    this.deps.bus.post({ t: 'snapshot', state });
+    this.deps.bus.post({ t: 'snapshot', from: this.me.id, state });
     this.emit();
     this.trace('call_started', { meetingId: id, mode: args.mode });
     return state;
@@ -173,7 +175,7 @@ export class MeetingClient {
     const { state, effects } = reduceMeeting(st, intent, this.ctx);
     this.meetings.set(meetingId, state);
     this.syncConversation(state);
-    this.deps.bus.post({ t: 'snapshot', state });
+    this.deps.bus.post({ t: 'snapshot', from: this.me.id, state });
     this.lastError = null;
     this.emit();
     for (const e of effects) this.track(this.runEffect(meetingId, e));
@@ -183,6 +185,15 @@ export class MeetingClient {
   private track(p: Promise<unknown>) {
     this.inflight.add(p);
     p.finally(() => this.inflight.delete(p));
+  }
+
+  /** Nouvel hôte : termine ce que l'ancien n'a pas pu enregistrer (publication du compte-rendu). */
+  private resumeAsHost(meetingId: string) {
+    this.trace('host_takeover', { meetingId });
+    const s = this.meetings.get(meetingId);
+    if (s?.report?.status === 'validated' && s.publishedReportId !== s.report.id) {
+      this.track(this.runEffect(meetingId, { type: 'publish_report' }));
+    }
   }
 
   /** Résultat d'un effet : appliqué seulement si je suis toujours l'hôte. */
@@ -203,8 +214,10 @@ export class MeetingClient {
     return {
       expertType: e.expertType, expertName: e.name, role: e.expertRole, lang: e.listenLang,
       participants: joinedHumans(state).map(p => p.name),
-      // La transcription n'existe que si tous les participants ont accepté la prise de notes.
-      transcript: state.transcript.map(c => ({ speaker: c.speakerName, text: c.text, lang: c.sourceLang })),
+      // La transcription n'est transmise à une IA que si tous les présents ont accepté la prise de notes.
+      transcript: state.noteTaking.status === 'active'
+        ? state.transcript.map(c => ({ speaker: c.speakerName, text: c.text, lang: c.sourceLang }))
+        : [],
     };
   }
 
@@ -247,7 +260,7 @@ export class MeetingClient {
         if (!ctx || !ctx.transcript.length) return;
         try {
           const items = await this.deps.expertEngine.notes(ctx);
-          this.internal(meetingId, { type: '_EXPERT_NOTES', expertId: effect.expertId, items });
+          this.internal(meetingId, { type: '_EXPERT_NOTES', expertId: effect.expertId, round: effect.round, items });
         } catch (e) {
           this.trace('expert_notes_failed', { meetingId, error: (e as Error).message });
         }
@@ -258,7 +271,7 @@ export class MeetingClient {
         if (!ctx || !ctx.transcript.length) return;
         try {
           const text = await this.deps.expertEngine.recap(ctx);
-          if (text.trim()) this.internal(meetingId, { type: '_EXPERT_RECAP', expertId: effect.expertId, text });
+          if (text.trim()) this.internal(meetingId, { type: '_EXPERT_RECAP', expertId: effect.expertId, round: effect.round, text });
         } catch (e) {
           this.trace('expert_recap_failed', { meetingId, error: (e as Error).message });
         }
@@ -294,16 +307,26 @@ export class MeetingClient {
         return;
       }
       case 'snapshot': {
+        // Seul l'hôte en cours fait foi (l'ancien hôte annonce lui-même son successeur).
+        // Limite : sans serveur, l'émetteur n'est pas authentifié (voir docs).
         const cur = this.meetings.get(m.state.id);
-        if (!cur || m.state.version > cur.version) {
-          this.meetings.set(m.state.id, m.state);
-          this.emit();
-        }
+        const fromHost = cur ? m.from === cur.hostId : m.from === m.state.hostId;
+        if (!fromHost || (cur && m.state.version <= cur.version)) return;
+        const becameHost = !!cur && cur.hostId !== this.me.id && m.state.hostId === this.me.id;
+        this.meetings.set(m.state.id, m.state);
+        this.emit();
+        if (becameHost) this.resumeAsHost(m.state.id);
         return;
       }
       case 'hello': {
+        if (m.from === this.me.id) {
+          this.duplicateIdentity = true;
+          this.emit();
+          if (!m.reply) this.deps.bus.post({ t: 'hello', from: this.me.id, reply: true });
+          return;
+        }
         for (const s of this.meetings.values()) {
-          if (s.hostId === this.me.id && s.status === 'active') this.deps.bus.post({ t: 'snapshot', state: s });
+          if (s.hostId === this.me.id && s.status === 'active') this.deps.bus.post({ t: 'snapshot', from: this.me.id, state: s });
         }
         return;
       }

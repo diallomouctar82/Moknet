@@ -42,6 +42,9 @@ export class MediaMesh {
   private stopped = false;
   private iceServers = readIceServers();
   private watchdog: ReturnType<typeof setInterval>;
+  private joined = new Set<string>();
+  // Signaux de personnes pas (encore) vues dans l'appel : jamais de flux envoyé à un inconnu.
+  private pendingFromUnknown = new Map<string, Array<{ at: number; data: any }>>();
   static STUCK_AFTER_MS = 8000;
 
   constructor(private client: MeetingClient, private meetingId: string, private onChange: () => void) {
@@ -58,6 +61,7 @@ export class MediaMesh {
     const now = Date.now();
     for (const p of Array.from(this.peers.values())) {
       if (p.polite) continue;
+      if (!p.pc.getTransceivers().length) continue; // aucun flux à négocier : rien à relancer
       const st = p.pc.connectionState;
       const stuck = (st === 'new' || st === 'connecting') && now - p.createdAt > MediaMesh.STUCK_AFTER_MS;
       if (stuck || st === 'failed') {
@@ -72,13 +76,24 @@ export class MediaMesh {
   /** Ouvre le micro (et la caméra en vidéo). En cas de refus, l'appel continue en écoute seule. */
   async start(mode: CallMode) {
     this.mode = mode;
+    let stream: MediaStream;
     try {
-      this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: mode === 'video' });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: mode === 'video' });
       this.mediaError = null;
     } catch (e) {
-      this.localStream = new MediaStream();
-      this.mediaError = `Micro/caméra indisponible (${(e as Error).name || 'erreur'}) : vous pouvez écouter et écrire.`;
+      try {
+        // Sans caméra (ou caméra refusée), on garde au moins le micro.
+        if (mode !== 'video') throw e;
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        this.mediaError = `Caméra indisponible (${(e as Error).name || 'erreur'}) : vous participez en audio.`;
+      } catch (e2) {
+        stream = new MediaStream();
+        this.mediaError = `Micro/caméra indisponible (${(e2 as Error).name || 'erreur'}) : vous pouvez écouter et écrire.`;
+      }
     }
+    // L'appel a pu être quitté pendant la demande d'autorisation : ne rien laisser allumé.
+    if (this.stopped) { stream.getTracks().forEach(t => t.stop()); return; }
+    this.localStream = stream;
     for (const p of this.peers.values()) this.attachLocalTracks(p);
     this.onChange();
   }
@@ -88,7 +103,13 @@ export class MediaMesh {
     if (this.stopped) return;
     const me = this.client.me.id;
     const others = joinedHumans(state).filter(p => p.id !== me).map(p => p.id);
+    this.joined = new Set(others);
     for (const id of others) if (!this.peers.has(id)) this.createPeer(id);
+    for (const [id, queued] of Array.from(this.pendingFromUnknown.entries())) {
+      if (!this.joined.has(id)) continue;
+      this.pendingFromUnknown.delete(id);
+      for (const q of queued) await this.handleSignal(id, q.data);
+    }
     // On ne ferme que les connexions des personnes explicitement parties : un signal
     // peut précéder de quelques millisecondes l'état qui annonce l'arrivée d'un participant.
     const gone = state.participants.filter(p => p.status === 'left' || p.status === 'declined').map(p => p.id);
@@ -133,6 +154,7 @@ export class MediaMesh {
       try {
         const cam = await navigator.mediaDevices.getUserMedia({ video: true });
         const track = cam.getVideoTracks()[0];
+        if (this.stopped || !this.localStream) { track.stop(); return; }
         this.localStream.addTrack(track);
         for (const p of this.peers.values()) p.pc.addTrack(track, this.localStream); // déclenche la renégociation
       } catch (e) {
@@ -196,6 +218,13 @@ export class MediaMesh {
   /** Négociation « parfaite » (pattern W3C) : gère les offres croisées sans blocage. */
   private async handleSignal(from: string, data: { description?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit; reset?: boolean }) {
     if (this.stopped) return;
+    if (!this.joined.has(from)) {
+      const now = Date.now();
+      const q = (this.pendingFromUnknown.get(from) ?? []).filter(x => now - x.at < 15_000);
+      if (q.length < 200) q.push({ at: now, data });
+      this.pendingFromUnknown.set(from, q);
+      return;
+    }
     if (data.reset) { this.closePeer(from); this.createPeer(from); return; }
     const peer = this.peers.get(from) ?? this.createPeer(from);
     const pc = peer.pc;

@@ -10,7 +10,7 @@ import {
   Caption, CallMode, MeetingEffect, MeetingIntent, MeetingRuleError, MeetingState, Participant, Person,
   ROLES_REQUIRING_CONSENT, EXPERT_ROLE_LABELS, WorkspaceItem, ExpertMeetingRole,
 } from './types';
-import { assessItem, emptyWorkspace, normalizeForDedup, validateColumns } from './workspace';
+import { assessItem, emptyWorkspace, validateColumns, dedupKey, MAX_TEXT_LENGTH, MAX_CELL_LENGTH } from './workspace';
 import { buildReportText, checksum } from './report';
 import { EXPERT_DIRECTORY } from './directory';
 
@@ -39,7 +39,7 @@ export const createMeeting = (args: {
     id: args.host.id, kind: 'human', name: args.host.name, status: 'joined',
     listenLang: args.host.lang, speakLang: args.host.lang, joinedAt: args.now, muted: false, camOn: args.mode === 'video',
   }],
-  noteTaking: { status: 'off', consents: {} },
+  noteTaking: { status: 'off', consents: {}, round: 0 },
   captions: [],
   transcript: [],
   expertMessages: [],
@@ -87,7 +87,8 @@ const recomputeConsent = (s: MeetingState, at: number) => {
   const before = nt.status;
   if (answers.some(a => a === 'refused')) {
     nt.status = 'refused';
-    log(s, at, 'Prise de notes refusée : aucune transcription n\'est conservée.', 'consent');
+    clearTranscript(s);
+    log(s, at, 'Prise de notes refusée : la transcription est effacée et plus rien n\'est conservé.', 'consent');
   } else if (answers.length && answers.every(a => a === 'accepted')) {
     nt.status = 'active';
     if (before !== 'active') log(s, at, 'Prise de notes active : tous les participants présents ont accepté.', 'consent');
@@ -97,6 +98,12 @@ const recomputeConsent = (s: MeetingState, at: number) => {
   }
 };
 
+/** La transcription brute n'existe que sous consentement : elle est effacée dès qu'il cesse. */
+const clearTranscript = (s: MeetingState) => {
+  s.transcript = [];
+  s.utterancesSinceNotes = 0;
+};
+
 const announceNotes = (s: MeetingState, requesterName: string) => {
   const takers = noteTakers(s).map(e => `${e.name} (expert IA, ${e.expertRole ? EXPERT_ROLE_LABELS[e.expertRole] : ''})`);
   return `${requesterName} propose une prise de notes${takers.length ? ` par ${takers.join(', ')}` : ''}. ` +
@@ -104,7 +111,7 @@ const announceNotes = (s: MeetingState, requesterName: string) => {
 };
 
 const startNoteRequest = (s: MeetingState, requester: Participant, at: number) => {
-  s.noteTaking = { status: 'requested', requestedBy: requester.id, consents: {}, announcement: '' };
+  s.noteTaking = { status: 'requested', round: (s.noteTaking.round ?? 0) + 1, requestedBy: requester.id, consents: {}, announcement: '' };
   for (const p of joinedHumans(s)) s.noteTaking.consents[p.id] = p.id === requester.id ? 'accepted' : 'pending';
   s.noteTaking.announcement = announceNotes(s, requester.name);
   log(s, at, s.noteTaking.announcement, 'consent');
@@ -236,6 +243,10 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
         const next = [...remaining].sort((a, b) => (a.joinedAt ?? 0) - (b.joinedAt ?? 0))[0];
         s.hostId = next.id;
         log(s, at, `${next.name} devient hôte de l'appel`);
+        // Les traitements en cours chez l'ancien hôte sont perdus : on l'affiche au lieu d'attendre indéfiniment.
+        s.expertMessages.forEach(m => { if (m.status === 'pending') m.status = 'failed'; });
+        for (const c of s.captions) for (const t of Object.values(c.translations)) if (t?.status === 'pending') t.status = 'failed';
+        for (const it of s.workspace.items) for (const t of Object.values(it.translations)) if (t?.status === 'pending') t.status = 'failed';
       }
       recomputeConsent(s, at);
       maybeValidateReport(s, at, effects);
@@ -245,6 +256,10 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
     case 'END': {
       const p = requireJoinedHuman(s, intent.by);
       if (p.id !== s.hostId) throw new MeetingRuleError('Seul l\'hôte peut terminer l\'appel pour tous');
+      if (s.report?.status === 'pending_approval') {
+        const waiting = Object.entries(s.report.approvals).filter(([, a]) => a !== 'approved').map(([id]) => getParticipant(s, id)?.name ?? id);
+        throw new MeetingRuleError(`Le compte-rendu attend encore la validation de ${waiting.join(', ')} : faites-le valider (ou demandez une correction) avant de terminer`);
+      }
       s.status = 'ended';
       s.endedAt = at;
       s.participants.forEach(x => { if (x.status === 'invited') x.status = 'declined'; });
@@ -300,8 +315,9 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
 
     case 'STOP_NOTES': {
       const p = requireJoinedHuman(s, intent.by);
-      s.noteTaking = { status: 'off', consents: {} };
-      log(s, at, `${p.name} a arrêté la prise de notes`, 'consent');
+      s.noteTaking = { status: 'off', consents: {}, round: s.noteTaking.round };
+      clearTranscript(s);
+      log(s, at, `${p.name} a arrêté la prise de notes ; la transcription est effacée`, 'consent');
       break;
     }
 
@@ -309,6 +325,7 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
       const p = requireJoinedHuman(s, intent.userId);
       const text = intent.text.trim();
       if (!text) throw new MeetingRuleError('Intervention vide');
+      if (text.length > MAX_TEXT_LENGTH) throw new MeetingRuleError(`Intervention trop longue (${MAX_TEXT_LENGTH} caractères maximum)`);
       const lang = intent.lang && isSupportedLang(intent.lang) ? intent.lang : p.speakLang;
       const caption = newCaption(s, ctx, { speakerId: p.id, speakerName: p.name, sourceLang: lang, text, at, kind: 'speech' });
       if (s.noteTaking.status === 'active') {
@@ -318,7 +335,7 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
         if (s.utterancesSinceNotes >= NOTES_EVERY) {
           s.utterancesSinceNotes = 0;
           for (const e of noteTakers(s)) {
-            effects.push({ type: e.expertRole === 'NOTE_TAKER' ? 'expert_notes' : 'expert_recap', expertId: e.id });
+            effects.push({ type: e.expertRole === 'NOTE_TAKER' ? 'expert_notes' : 'expert_recap', expertId: e.id, round: s.noteTaking.round });
           }
         }
       }
@@ -333,6 +350,7 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
       if (e.expertRole !== 'ADVISOR') throw new MeetingRuleError(`${e.name} est ${EXPERT_ROLE_LABELS[e.expertRole!]} : il ne répond pas aux questions`);
       const question = intent.question.trim();
       if (!question) throw new MeetingRuleError('Question vide');
+      if (question.length > MAX_TEXT_LENGTH) throw new MeetingRuleError(`Question trop longue (${MAX_TEXT_LENGTH} caractères maximum)`);
       const id = ctx.newId('ask');
       s.expertMessages.push({ id, expertId: e.id, expertName: e.name, askedBy: p.id, question, lang: p.listenLang, status: 'pending', at });
       if (s.expertMessages.length > 100) s.expertMessages.splice(0, s.expertMessages.length - 100);
@@ -347,7 +365,7 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
       if (!e.expertRole || !ROLES_REQUIRING_CONSENT.includes(e.expertRole)) throw new MeetingRuleError('Cet expert ne prend pas de notes');
       if (s.noteTaking.status !== 'active') throw new MeetingRuleError('La prise de notes doit être acceptée par tous les participants');
       s.utterancesSinceNotes = 0;
-      effects.push({ type: e.expertRole === 'NOTE_TAKER' ? 'expert_notes' : 'expert_recap', expertId: e.id });
+      effects.push({ type: e.expertRole === 'NOTE_TAKER' ? 'expert_notes' : 'expert_recap', expertId: e.id, round: s.noteTaking.round });
       break;
     }
 
@@ -355,6 +373,7 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
       const p = requireJoinedHuman(s, intent.by);
       const text = intent.text.trim();
       if (!text) throw new MeetingRuleError('Texte vide');
+      if (text.length > MAX_TEXT_LENGTH) throw new MeetingRuleError(`Texte trop long (${MAX_TEXT_LENGTH} caractères maximum)`);
       const item = assessItem({
         id: ctx.newId('item'), section: intent.section, text, owner: intent.owner?.trim() || undefined, due: intent.due?.trim() || undefined,
         authorId: p.id, authorName: p.name, aiGenerated: false, confirmedBy: [], uncertain: false, reasons: [], calcChecks: [],
@@ -371,11 +390,13 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
       if (!it) throw new MeetingRuleError('Élément introuvable');
       const text = intent.text.trim();
       if (!text) throw new MeetingRuleError('Texte vide');
+      if (text.length > MAX_TEXT_LENGTH) throw new MeetingRuleError(`Texte trop long (${MAX_TEXT_LENGTH} caractères maximum)`);
       it.history.push({ by: p.name, at, text: it.text });
       it.text = text;
       if (intent.owner !== undefined) it.owner = intent.owner.trim() || undefined;
       if (intent.due !== undefined) it.due = intent.due.trim() || undefined;
       it.confirmedBy = [];          // le contenu a changé : les confirmations précédentes ne valent plus
+      it.humanEdited = true;
       it.updatedAt = at;
       it.via = intent.via ?? 'text';
       it.lang = p.speakLang;
@@ -396,9 +417,11 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
 
     case 'WS_DELETE_ITEM': {
       requireJoinedHuman(s, intent.by);
-      const before = s.workspace.items.length;
+      const it = s.workspace.items.find(i => i.id === intent.itemId);
+      if (!it) throw new MeetingRuleError('Élément introuvable');
       s.workspace.items = s.workspace.items.filter(i => i.id !== intent.itemId);
-      if (s.workspace.items.length === before) throw new MeetingRuleError('Élément introuvable');
+      for (const t of [it.text, ...it.history.map(h => h.text)]) s.workspace.dismissed.push(dedupKey(it.section, t));
+      if (s.workspace.dismissed.length > 500) s.workspace.dismissed.splice(0, s.workspace.dismissed.length - 500);
       break;
     }
 
@@ -421,6 +444,7 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
       for (const c of s.workspace.table.columns) {
         if (c.type === 'computed') continue; // calculé par le logiciel
         cells[c.name] = (intent.cells[c.name] ?? '').trim();
+        if (cells[c.name].length > MAX_CELL_LENGTH) throw new MeetingRuleError(`Cellule « ${c.name} » trop longue (${MAX_CELL_LENGTH} caractères maximum)`);
       }
       s.workspace.table.rows.push({ id: ctx.newId('row'), cells, authorId: p.id, updatedAt: at });
       break;
@@ -432,6 +456,7 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
       const col = s.workspace.table.columns.find(c => c.name === intent.column);
       if (!row || !col) throw new MeetingRuleError('Cellule introuvable');
       if (col.type === 'computed') throw new MeetingRuleError(`« ${col.name} » est calculée par le logiciel et ne se modifie pas à la main`);
+      if (intent.value.trim().length > MAX_CELL_LENGTH) throw new MeetingRuleError(`Cellule trop longue (${MAX_CELL_LENGTH} caractères maximum)`);
       row.cells[col.name] = intent.value.trim();
       row.updatedAt = at;
       break;
@@ -515,13 +540,20 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
 
     case '_EXPERT_NOTES': {
       // Le consentement a pu être retiré pendant le traitement : on n'écrit rien dans ce cas.
-      if (s.noteTaking.status !== 'active') { log(s, at, 'Notes de l\'expert ignorées : consentement non actif', 'warning'); break; }
+      // Le consentement a pu changer pendant le traitement (retrait, ou nouveau tour d'accord).
+      if (s.noteTaking.status !== 'active' || intent.round !== s.noteTaking.round) { log(s, at, 'Notes de l\'expert ignorées : consentement non actif pour ce tour', 'warning'); break; }
       const e = getParticipant(s, intent.expertId);
       if (!e || e.status !== 'joined') break;
-      const seen = new Set(s.workspace.items.map(i => `${i.section}|${normalizeForDedup(i.text)}`));
+      // Ni doublon, ni élément supprimé, ni ancienne version d'un élément corrigé par un participant.
+      const seen = new Set([
+        ...s.workspace.dismissed,
+        ...s.workspace.items.flatMap(i => [i.text, ...i.history.map(h => h.text)].map(t => dedupKey(i.section, t))),
+      ]);
       for (const n of intent.items) {
-        const key = `${n.section}|${normalizeForDedup(n.text)}`;
-        if (!n.text.trim() || seen.has(key)) continue;
+        if (!n.text.trim()) continue;
+        n.text = n.text.trim().slice(0, MAX_TEXT_LENGTH);
+        const key = dedupKey(n.section, n.text);
+        if (seen.has(key)) continue;
         seen.add(key);
         const item = assessItem({
           id: ctx.newId('item'), section: n.section, text: n.text.trim(), owner: n.owner, due: n.due,
@@ -535,13 +567,17 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
     }
 
     case '_EXPERT_RECAP': {
-      if (s.noteTaking.status !== 'active') { log(s, at, 'Récap de l\'expert ignoré : consentement non actif', 'warning'); break; }
+      if (s.noteTaking.status !== 'active' || intent.round !== s.noteTaking.round) { log(s, at, 'Récap de l\'expert ignoré : consentement non actif pour ce tour', 'warning'); break; }
       const e = getParticipant(s, intent.expertId);
       if (!e || e.status !== 'joined' || !intent.text.trim()) break;
       const existing = s.workspace.items.find(i => i.section === 'recap' && i.authorId === e.id);
+      if (existing?.humanEdited) {
+        log(s, at, `Récap de ${e.name} non mis à jour : un participant l'a corrigé (supprimez-le pour relancer le récap automatique).`);
+        break;
+      }
       if (existing) {
         existing.history.push({ by: e.name, at, text: existing.text });
-        existing.text = intent.text.trim();
+        existing.text = intent.text.trim().slice(0, MAX_TEXT_LENGTH);
         existing.confirmedBy = [];
         existing.updatedAt = at;
         existing.lang = e.listenLang;
@@ -550,7 +586,7 @@ export const reduceMeeting = (prev: MeetingState, intent: MeetingIntent, ctx: Co
         queueItemTranslation(s, existing, effects);
       } else {
         const item = assessItem({
-          id: ctx.newId('item'), section: 'recap', text: intent.text.trim(), authorId: e.id, authorName: e.name,
+          id: ctx.newId('item'), section: 'recap', text: intent.text.trim().slice(0, MAX_TEXT_LENGTH), authorId: e.id, authorName: e.name,
           aiGenerated: true, confirmedBy: [], uncertain: true, reasons: [], calcChecks: [], via: 'expert',
           lang: e.listenLang, translations: {}, createdAt: at, updatedAt: at, history: [],
         });

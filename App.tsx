@@ -201,7 +201,10 @@ const App: React.FC = () => {
                   onOpenGroupCall={() => setCurrentView(AppView.CALLS)}
               />
           )}
-          {currentView === AppView.CALLS && <CallsHub />}
+          {/* Toujours monté : changer de vue ne raccroche pas et les invitations arrivent partout. */}
+          <div className={currentView === AppView.CALLS ? 'h-full' : 'hidden'}>
+              <CallsHub visible={currentView === AppView.CALLS} onOpen={() => setCurrentView(AppView.CALLS)} />
+          </div>
           {currentView === AppView.SOCIAL && <SocialFeed />}
           {currentView === AppView.SCHOOL && (
               <MokSchool 

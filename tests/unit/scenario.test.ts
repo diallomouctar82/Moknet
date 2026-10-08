@@ -201,6 +201,75 @@ describe('Scénario 3 personnes + expert', () => {
     expect(w.jp.incomingInvitations()).toHaveLength(1);
   });
 
+  it('après retrait de l\'accord, aucune parole n\'est envoyée à l\'IA conseillère', async () => {
+    const w = setupWorld();
+    const call = w.moussa.startCall({ mode: 'audio' });
+    await w.moussa.dispatch(call.id, { type: 'INVITE_PERSON', by: 'moussa', person: w.aminata.me });
+    await w.settle();
+    await w.aminata.dispatch(call.id, { type: 'RESPOND_INVITE', userId: 'aminata', accept: true });
+    await w.moussa.dispatch(call.id, { type: 'INVITE_EXPERT', by: 'moussa', expertType: ExpertType.CONSEILLER, role: 'ADVISOR' });
+    await w.moussa.dispatch(call.id, { type: 'REQUEST_NOTES', by: 'moussa' });
+    await w.aminata.dispatch(call.id, { type: 'CONSENT', userId: 'aminata', accept: true });
+    await w.aminata.dispatch(call.id, { type: 'UTTERANCE', userId: 'aminata', text: 'My salary is 1200 and I am ill' });
+    await w.aminata.dispatch(call.id, { type: 'STOP_NOTES', by: 'aminata' });
+    await w.moussa.dispatch(call.id, { type: 'ASK_EXPERT', by: 'moussa', expertId: expertParticipantId(ExpertType.CONSEILLER), question: 'Un conseil ?' });
+    await w.settle();
+    expect(w.engine.answers).toHaveLength(1);
+    expect(w.engine.answers[0].transcript).toEqual([]);
+  });
+
+  it('un état forgé par un non-hôte est ignoré', async () => {
+    const w = setupWorld();
+    const call = w.moussa.startCall({ mode: 'audio' });
+    await w.moussa.dispatch(call.id, { type: 'INVITE_PERSON', by: 'moussa', person: w.aminata.me });
+    await w.settle();
+    const forged = structuredClone(w.aminata.get(call.id)!);
+    forged.hostId = 'fatou';
+    forged.version += 100;
+    const attacker = w.hub.endpoint();
+    attacker.post({ t: 'snapshot', from: 'fatou', state: forged });
+    await w.settle();
+    expect(w.aminata.get(call.id)!.hostId).toBe('moussa');
+    expect(w.moussa.get(call.id)!.hostId).toBe('moussa');
+  });
+
+  it('deux onglets avec la même identité sont signalés', async () => {
+    const w = setupWorld();
+    const twin = new MeetingClient({
+      bus: w.hub.endpoint(), me: { id: 'moussa', name: 'Moussa D.', lang: 'fr' }, translator: w.translator,
+      expertEngine: w.engine, store: new ConversationStore(w.storage),
+    });
+    await w.settle();
+    await twin.settle();
+    expect(w.moussa.duplicateIdentity).toBe(true);
+    expect(twin.duplicateIdentity).toBe(true);
+    expect(w.aminata.duplicateIdentity).toBe(false);
+  });
+
+  it('compte-rendu validé au départ de l\'hôte : le nouvel hôte termine la publication', async () => {
+    const w = setupWorld();
+    const call = w.moussa.startCall({ mode: 'audio' });
+    for (const c of [w.aminata, w.jp]) {
+      await w.moussa.dispatch(call.id, { type: 'INVITE_PERSON', by: 'moussa', person: c.me });
+      await w.settle();
+      await c.dispatch(call.id, { type: 'RESPOND_INVITE', userId: c.me.id, accept: true });
+    }
+    await w.aminata.dispatch(call.id, { type: 'REPORT_PROPOSE', by: 'aminata' });
+    await w.jp.dispatch(call.id, { type: 'REPORT_APPROVE', userId: 'jeanpierre' });
+    // L'hôte part sans valider : le compte-rendu devient validé dans ce même départ,
+    // la publication de l'ancien hôte n'est plus enregistrable, le nouvel hôte la reprend.
+    await w.moussa.dispatch(call.id, { type: 'LEAVE', userId: 'moussa' });
+    await w.settle();
+    const st = w.aminata.get(call.id)!;
+    expect(st.hostId).toBe('aminata');
+    expect(st.report!.status).toBe('validated');
+    expect(st.report!.authorizedViewers.sort()).toEqual(['aminata', 'jeanpierre']);
+    expect(st.publishedReportId).toBe(st.report!.id);
+    const store = new ConversationStore(w.storage);
+    expect(store.listFor('aminata')[0].messages.filter(m => m.kind === 'report')).toHaveLength(1);
+    expect(store.listFor('moussa')[0].messages.filter(m => m.kind === 'report')).toHaveLength(0);
+  });
+
   it('traduction indisponible : repli explicite, l\'appel continue', async () => {
     const w = setupWorld();
     w.translator.failOn.add('en');

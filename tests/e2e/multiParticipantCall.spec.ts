@@ -114,6 +114,17 @@ test('3 personnes + 1 expert : audio puis vidéo, ajout en cours d\'appel, tradu
   for (const p of [moussa, aminata, jp]) await expectMediaConnected(p, 2, 'audio');
   evidence.audio = { moussa: (await diag(moussa)).media, aminata: (await diag(aminata)).media, jeanpierre: (await diag(jp)).media };
 
+  // Un onglet hors de l'appel (Fatou) qui envoie une offre WebRTC à Moussa ne reçoit aucun flux.
+  const meetingId = (await diag(moussa)).meeting.id;
+  await fatou.evaluate(async ({ meetingId }) => {
+    const pc = new RTCPeerConnection();
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+    const offer = await pc.createOffer();
+    new BroadcastChannel('moknet-calls-v1').postMessage({ t: 'signal', meetingId, from: 'fatou', to: 'moussa', data: { description: { type: offer.type, sdp: offer.sdp } } });
+  }, { meetingId });
+  await moussa.waitForTimeout(1500);
+  expect((await diag(moussa)).media.map((m: any) => m.peerId).sort()).toEqual(['aminata', 'jeanpierre']);
+
   // 3. Moussa invite Maître Diallo comme preneur de notes : annonce et accord de chacun.
   await moussa.getByTestId('add-participant').click();
   await moussa.getByTestId('invite-tab-experts').click();
@@ -184,6 +195,13 @@ test('3 personnes + 1 expert : audio puis vidéo, ajout en cours d\'appel, tradu
   await expectRemoteVideoPlaying(jp, ['moussa', 'aminata']);
   evidence.video = { moussa: (await diag(moussa)).media, aminata: (await diag(aminata)).media, jeanpierre: (await diag(jp)).media };
   await shot(moussa, '05-appel-video-3-personnes-1-expert');
+
+  // Changer de vue ne raccroche pas : un bandeau permet de revenir à l'appel, le média reste connecté.
+  await moussa.getByRole('button', { name: 'Assistants IA' }).click();
+  await expect(moussa.getByTestId('call-return-banner')).toBeVisible();
+  await expectMediaConnected(moussa, 2, 'video');
+  await moussa.getByTestId('call-return-banner').click();
+  await expect(moussa.getByTestId('meeting-room')).toBeVisible();
 
   // 8. Compte-rendu : proposé par Moussa, validé par chacun, enregistré dans la conversation.
   await moussa.getByTestId('ws-tab-report').click();

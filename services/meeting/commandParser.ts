@@ -12,7 +12,12 @@ export type ParsedCommand =
   | { kind: 'row'; values: string[] }
   | { kind: 'cell'; index: number; column: string; value: string };
 
-export interface ParseContext { participantNames: string[]; columnNames: string[] }
+export interface ParseContext {
+  participantNames: string[];
+  columnNames: string[];
+  /** Strict : le mot-clé doit être suivi de « : » (lecture automatique d'une transcription). */
+  strict?: boolean;
+}
 
 const fold = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
@@ -26,31 +31,39 @@ const SECTION_WORDS: Array<{ section: WorkspaceSection | 'row'; words: string[] 
 const sectionOf = (word: string) => SECTION_WORDS.find(s => s.words.includes(fold(word)))?.section;
 
 const SEP = String.raw`\s*[:\-–—]?\s*`;
+const STRICT_SEP = String.raw`\s*[:\-–—]\s*`;
+// Mot-clé entier : « Actionnaires » ou « Notez » ne sont pas des commandes. Formes longues d'abord.
+const keyword = (words: string[], strict: boolean) =>
+  new RegExp(`^(?:${[...words].sort((a, b) => b.length - a.length).join('|')})(?![\\p{L}])${strict ? STRICT_SEP : SEP}`, 'iu');
 // Phrase naturelle : « On a décidé que X » → X ; « On a décidé de X » → la phrase entière.
 const NATURAL_DECISION = /^(?:on a decide|nous avons decide|we decided|we agreed|decidimos|acordamos)(\s+(?:que|that))?\s*[:,]?\s*/i;
 
-const ADD_PREFIXES: Array<{ re: RegExp; section: WorkspaceSection | 'row' }> = [
-  { re: new RegExp(String.raw`^(?:decision|decisions|decisiones)${SEP}`, 'i'), section: 'decisions' },
-  { re: new RegExp(String.raw`^(?:action|actions|tache|task|tarea|accion)${SEP}`, 'i'), section: 'actions' },
-  { re: new RegExp(String.raw`^(?:recap|resume|summary|resumen|note|nota)${SEP}`, 'i'), section: 'recap' },
-  { re: new RegExp(String.raw`^(?:ajoute(?:r)? (?:une )?ligne|ligne|add row|row|fila)${SEP}`, 'i'), section: 'row' },
+const PREFIX_WORDS: Array<{ words: string[]; section: WorkspaceSection | 'row' }> = [
+  { words: ['decision', 'decisions', 'decisiones'], section: 'decisions' },
+  { words: ['action', 'actions', 'tache', 'taches', 'task', 'tasks', 'tarea', 'tareas', 'accion', 'acciones'], section: 'actions' },
+  { words: ['recap', 'resume', 'summary', 'resumen', 'note', 'notes', 'nota'], section: 'recap' },
+  { words: ['ajouter une ligne', 'ajoute une ligne', 'ajouter ligne', 'ajoute ligne', 'add row', 'ligne', 'row', 'fila'], section: 'row' },
 ];
+const ADD_PREFIXES = {
+  lenient: PREFIX_WORDS.map(p => ({ re: keyword(p.words, false), section: p.section })),
+  strict: PREFIX_WORDS.map(p => ({ re: keyword(p.words, true), section: p.section })),
+};
 
 const EDIT_RE = /^(?:corrige(?:r)?|modifie(?:r)?|remplace(?:r)?|fix|correct|edit|update|corrige|corregir|corrija|cambia(?:r)?)\s+(?:la |le |l'|the )?(\S+)\s+(?:n[°o]\s*|numero\s+|number\s+|#)?(\d+)\s*[:\-–—]?\s*([\s\S]+)$/i;
 const DELETE_RE = /^(?:supprime(?:r)?|efface(?:r)?|retire(?:r)?|delete|remove|borra(?:r)?|elimina(?:r)?)\s+(?:la |le |l'|the )?(\S+)\s+(?:n[°o]\s*|numero\s+|number\s+|#)?(\d+)\s*$/i;
 
 // Échéance : "avant vendredi", "d'ici le 15 mars", "by Friday", "antes del viernes".
-const DUE_RE = /\s+(?:avant(?: le)?|d'ici(?: le| à)?|au plus tard(?: le)?|by|before|due|antes de(?:l)?|para el)\s+(.+)$/i;
+// Le préfixe gourmand retient le DERNIER mot-clé (« by phone before Friday » → « Friday »).
+const DUE_RE = /^(.*\S)\s+(?:avant(?: le)?|d'ici(?: le| a)?|au plus tard(?: le)?|by|before|due|antes de(?:l)?|para el)\s+(\S.*)$/id;
 
 const extractOwnerAndDue = (text: string, ctx: ParseContext) => {
   let rest = text;
   let due: string | undefined;
-  const dm = DUE_RE.exec(fold(rest));
-  if (dm) {
-    const idx = dm.index;
+  const dm = DUE_RE.exec(fold(rest)) as (RegExpExecArray & { indices?: Array<[number, number]> }) | null;
+  if (dm?.indices) {
     // le motif est cherché sans accents, mais l'échéance garde le texte original
-    due = rest.slice(idx + dm[0].length - dm[1].length).trim();
-    rest = rest.slice(0, idx).trim();
+    due = rest.slice(dm.indices[2][0]).trim();
+    rest = rest.slice(0, dm.indices[1][1]).trim();
   }
   let owner: string | undefined;
   const at = /@([\p{L}][\p{L}\-' .]*)$/u.exec(rest);
@@ -112,7 +125,7 @@ export const parseWorkspaceCommand = (input: string, ctx: ParseContext): ParsedC
     if (body) return { kind: 'add', section: 'decisions', text: body.replace(/[.;]\s*$/, '') };
   }
 
-  for (const p of ADD_PREFIXES) {
+  for (const p of ctx.strict ? ADD_PREFIXES.strict : ADD_PREFIXES.lenient) {
     const m = p.re.exec(folded);
     if (!m) continue;
     const body = raw.slice(m[0].length).trim();

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Phone, Video, PhoneIncoming, Lock, FileText, Users, Bot } from 'lucide-react';
 import { useCallClient, initialIdentity, rememberIdentity } from './useCallClient';
 import { MeetingRoom, LanguageOptions } from './MeetingRoom';
@@ -9,7 +10,13 @@ import { ConversationStore } from '../../services/meeting/conversationStore';
 import { LangCode, languageLabel } from '../../services/meeting/languages';
 import { ExpertType } from '../../types';
 
-export const CallsHub: React.FC = () => {
+interface CallsHubProps {
+  /** Faux quand une autre vue de l'application est affichée : l'appel continue en arrière-plan. */
+  visible?: boolean;
+  onOpen?: () => void;
+}
+
+export const CallsHub: React.FC<CallsHubProps> = ({ visible = true, onOpen }) => {
   const [identity, setIdentity] = useState(initialIdentity);
   const ctx = useCallClient(identity);
   if (!ctx) return <div className="p-8 text-slate-500">Connexion…</div>;
@@ -19,6 +26,19 @@ export const CallsHub: React.FC = () => {
 
   return (
     <div className="h-full overflow-y-auto bg-slate-50 pb-28 md:pb-0" data-testid="calls-hub" data-identity={identity}>
+      {!visible && (current || invites.length > 0) && createPortal(
+        <button data-testid="call-return-banner" onClick={onOpen}
+          className="fixed z-[90] bottom-24 md:bottom-6 right-4 left-4 md:left-auto md:w-96 bg-emerald-700 text-white rounded-2xl shadow-2xl px-4 py-3 text-left text-sm font-bold flex items-center gap-2">
+          <PhoneIncoming size={18} />
+          {invites.length > 0 ? `Invitation à un appel : ${invites[0].title} — ouvrir` : `Appel en cours : ${current!.title} — revenir`}
+        </button>,
+        document.body,
+      )}
+      {client.duplicateIdentity && (
+        <div className="m-3 p-3 rounded-xl bg-red-50 border border-red-200 text-red-800 text-sm" role="alert" data-testid="duplicate-identity">
+          Un autre onglet utilise déjà le profil « {client.me.name} ». Choisissez un autre profil ici (ou ajoutez ?as=… à l'adresse) pour éviter deux hôtes concurrents.
+        </div>
+      )}
       {invites.length > 0 && (
         <div className="sticky top-0 z-40 p-3 space-y-2">
           {invites.map(m => <IncomingInvite key={m.id} client={client} meeting={m} />)}

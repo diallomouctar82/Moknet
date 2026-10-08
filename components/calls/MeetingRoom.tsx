@@ -240,7 +240,8 @@ const CaptionsPanel: React.FC<{ meeting: MeetingState; meId: string; me: Partici
       <h3 className="font-bold text-sm text-slate-900 flex items-center gap-2"><MessageSquare size={16} /> Sous-titres en {languageLabel(me.listenLang)}</h3>
       <p className="text-[11px] text-slate-500">Chaque intervention est traduite une fois par langue d'écoute. Sans accord de tous, rien n'est conservé après l'appel.</p>
       <ul className="mt-3 space-y-2 max-h-64 overflow-y-auto" data-testid="captions">
-        {meeting.captions.map(c => {
+        {/* Un participant ne voit pas ce qui a été dit avant son arrivée. */}
+        {meeting.captions.filter(c => c.at >= (me.joinedAt ?? 0)).map(c => {
           const { text: shown, note } = captionText(c, me.listenLang);
           return (
             <li key={c.id} data-testid="caption" data-speaker={c.speakerId} className={`text-sm p-2 rounded-xl ${c.kind === 'expert' ? 'bg-indigo-50' : 'bg-slate-50'}`}>

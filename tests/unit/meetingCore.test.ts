@@ -142,14 +142,46 @@ describe('prise de notes : annoncée et acceptée par tous', () => {
     const t = withNotes();
     t.run({ type: 'CONSENT', userId: 'aminata', accept: true });
     t.run({ type: 'STOP_NOTES', by: 'aminata' });
-    t.run({ type: '_EXPERT_NOTES', expertId: MAITRE, items: [{ section: 'decisions', text: 'secret' }] });
+    t.run({ type: '_EXPERT_NOTES', expertId: MAITRE, round: t.state.noteTaking.round, items: [{ section: 'decisions', text: 'secret' }] });
+    expect(t.state.workspace.items).toHaveLength(0);
+  });
+
+  it('retirer ou refuser l\'accord efface la transcription brute', () => {
+    const t = withNotes();
+    t.run({ type: 'CONSENT', userId: 'aminata', accept: true });
+    t.run({ type: 'UTTERANCE', userId: 'aminata', text: 'My salary is 1200 and I am ill' });
+    expect(t.state.transcript).toHaveLength(1);
+    t.run({ type: 'STOP_NOTES', by: 'aminata' });
+    expect(t.state.transcript).toHaveLength(0);
+
+    const u = withNotes();
+    u.run({ type: 'CONSENT', userId: 'aminata', accept: true });
+    u.run({ type: 'UTTERANCE', userId: 'aminata', text: 'confidentiel' });
+    u.run({ type: 'INVITE_PERSON', by: 'moussa', person: jp });
+    u.run({ type: 'RESPOND_INVITE', userId: 'jeanpierre', accept: true });
+    u.run({ type: 'CONSENT', userId: 'jeanpierre', accept: false });
+    expect(u.state.noteTaking.status).toBe('refused');
+    expect(u.state.transcript).toHaveLength(0);
+  });
+
+  it('un résultat d\'IA d\'un tour de consentement précédent est ignoré', () => {
+    const t = withNotes();
+    t.run({ type: 'CONSENT', userId: 'aminata', accept: true });
+    const oldRound = t.state.noteTaking.round;
+    t.run({ type: 'STOP_NOTES', by: 'aminata' });
+    t.run({ type: 'REQUEST_NOTES', by: 'moussa' });
+    t.run({ type: 'CONSENT', userId: 'aminata', accept: true });
+    expect(t.state.noteTaking.status).toBe('active');
+    expect(t.state.noteTaking.round).toBe(oldRound + 1);
+    t.run({ type: '_EXPERT_NOTES', expertId: MAITRE, round: oldRound, items: [{ section: 'decisions', text: 'dit avant le retrait' }] });
+    t.run({ type: '_EXPERT_RECAP', expertId: MAITRE, round: oldRound, text: 'récap ancien' });
     expect(t.state.workspace.items).toHaveLength(0);
   });
 
   it('les notes de l\'expert arrivent marquées incertaines, dédoublonnées, puis confirmables', () => {
     const t = withNotes();
     t.run({ type: 'CONSENT', userId: 'aminata', accept: true });
-    t.run({ type: '_EXPERT_NOTES', expertId: MAITRE, items: [{ section: 'decisions', text: 'Démarrage lundi' }, { section: 'decisions', text: 'démarrage  LUNDI' }] });
+    t.run({ type: '_EXPERT_NOTES', expertId: MAITRE, round: t.state.noteTaking.round, items: [{ section: 'decisions', text: 'Démarrage lundi' }, { section: 'decisions', text: 'démarrage  LUNDI' }] });
     expect(t.state.workspace.items).toHaveLength(1);
     const it0 = t.state.workspace.items[0];
     expect(it0).toMatchObject({ aiGenerated: true, uncertain: true });
@@ -182,6 +214,80 @@ describe('espace partagé', () => {
     t.run({ type: 'WS_TABLE_ADD_ROW', by: 'moussa', cells: { Article: 'Ciment', Quantité: '3', Prix: '1500', Montant: '999' } });
     expect(t.state.workspace.table.rows[0].cells.Montant).toBeUndefined();
     expect(() => t.run({ type: 'WS_TABLE_EDIT_CELL', by: 'moussa', rowId: t.state.workspace.table.rows[0].id, column: 'Montant', value: '1' })).toThrow(/calculée/);
+  });
+});
+
+describe('protections issues de la revue', () => {
+  const notesOn = () => {
+    const t = setup();
+    t.run({ type: 'INVITE_PERSON', by: 'moussa', person: aminata });
+    t.run({ type: 'RESPOND_INVITE', userId: 'aminata', accept: true });
+    t.run({ type: 'INVITE_EXPERT', by: 'moussa', expertType: ExpertType.MAITRE, role: 'NOTE_TAKER' });
+    t.run({ type: 'CONSENT', userId: 'aminata', accept: true });
+    return t;
+  };
+
+  it('une note IA supprimée ou corrigée n\'est pas reproposée', () => {
+    const t = notesOn();
+    const round = t.state.noteTaking.round;
+    t.run({ type: '_EXPERT_NOTES', expertId: MAITRE, round, items: [{ section: 'decisions', text: 'Acheter 3 camions' }, { section: 'decisions', text: 'Ouvrir lundi' }] });
+    const [a, b] = t.state.workspace.items;
+    t.run({ type: 'WS_DELETE_ITEM', by: 'moussa', itemId: a.id });
+    t.run({ type: 'WS_EDIT_ITEM', by: 'aminata', itemId: b.id, text: 'Ouvrir mardi' });
+    t.run({ type: '_EXPERT_NOTES', expertId: MAITRE, round, items: [{ section: 'decisions', text: 'Acheter 3 camions' }, { section: 'decisions', text: 'Ouvrir lundi' }] });
+    expect(t.state.workspace.items.map(i => i.text)).toEqual(['Ouvrir mardi']);
+  });
+
+  it('un récap corrigé par un participant n\'est plus écrasé par l\'expert', () => {
+    const t = setup();
+    t.run({ type: 'INVITE_EXPERT', by: 'moussa', expertType: ExpertType.DIALLO, role: 'LIVE_RECAP' });
+    const id = expertParticipantId(ExpertType.DIALLO);
+    const round = t.state.noteTaking.round;
+    expect(t.state.noteTaking.status).toBe('active'); // seul présent, le demandeur a accepté
+    t.run({ type: '_EXPERT_RECAP', expertId: id, round, text: 'Récap v1' });
+    const item = t.state.workspace.items[0];
+    t.run({ type: 'WS_EDIT_ITEM', by: 'moussa', itemId: item.id, text: 'Récap corrigé à la main' });
+    t.run({ type: '_EXPERT_RECAP', expertId: id, round, text: 'Récap v2' });
+    expect(t.state.workspace.items[0].text).toBe('Récap corrigé à la main');
+  });
+
+  it('l\'hôte ne peut pas terminer pendant que le compte-rendu attend des validations', () => {
+    const t = setup();
+    t.run({ type: 'INVITE_PERSON', by: 'moussa', person: aminata });
+    t.run({ type: 'RESPOND_INVITE', userId: 'aminata', accept: true });
+    t.run({ type: 'REPORT_PROPOSE', by: 'moussa' });
+    expect(() => t.run({ type: 'END', by: 'moussa' })).toThrow(/Aminata K\./);
+    t.run({ type: 'REPORT_APPROVE', userId: 'aminata' });
+    t.run({ type: 'END', by: 'moussa' });
+    expect(t.state.status).toBe('ended');
+  });
+
+  it('textes, questions et cellules sont bornés', () => {
+    const t = setup();
+    const long = '1+'.repeat(1500) + '1';
+    expect(() => t.run({ type: 'WS_ADD_ITEM', by: 'moussa', section: 'recap', text: long })).toThrow(/trop long/);
+    expect(() => t.run({ type: 'UTTERANCE', userId: 'moussa', text: long })).toThrow(/trop longue/);
+    t.run({ type: 'WS_TABLE_SETUP', by: 'moussa', title: 'T', columns: [{ name: 'A', type: 'text' }] });
+    expect(() => t.run({ type: 'WS_TABLE_ADD_ROW', by: 'moussa', cells: { A: 'x'.repeat(201) } })).toThrow(/trop longue/);
+  });
+
+  it('une formule ne peut utiliser que des colonnes placées avant elle', () => {
+    const t = setup();
+    expect(() => t.run({ type: 'WS_TABLE_SETUP', by: 'moussa', title: 'T', columns: [
+      { name: 'Double', type: 'computed', formula: '{Total} * 2' }, { name: 'Total', type: 'number' },
+    ] })).toThrow(/placées avant/);
+  });
+
+  it('quand l\'hôte change, les traitements en attente ne restent pas « en cours » indéfiniment', () => {
+    const t = setup();
+    t.run({ type: 'INVITE_PERSON', by: 'moussa', person: aminata });
+    t.run({ type: 'RESPOND_INVITE', userId: 'aminata', accept: true });
+    t.run({ type: 'INVITE_EXPERT', by: 'moussa', expertType: ExpertType.MAITRE, role: 'ADVISOR' });
+    t.run({ type: 'ASK_EXPERT', by: 'aminata', expertId: MAITRE, question: 'Q ?' });
+    t.run({ type: 'UTTERANCE', userId: 'moussa', text: 'Bonjour' });
+    t.run({ type: 'LEAVE', userId: 'moussa' });
+    expect(t.state.expertMessages[0].status).toBe('failed');
+    expect(t.state.captions[0].translations.en?.status).toBe('failed');
   });
 });
 

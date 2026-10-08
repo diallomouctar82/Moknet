@@ -56,4 +56,22 @@ describe('commandes vocales ou écrites sur l\'espace partagé', () => {
   it('ne devine pas une phrase non reconnue', () => {
     expect(parseWorkspaceCommand('Bonjour à tous', ctx)).toBeNull();
   });
+  it('reconnaît des mots-clés entiers, au pluriel compris', () => {
+    expect(parseWorkspaceCommand('Décisions : acheter le ciment', ctx)).toMatchObject({ section: 'decisions', text: 'acheter le ciment' });
+    expect(parseWorkspaceCommand('Actions: call the bank', ctx)).toMatchObject({ section: 'actions', text: 'call the bank' });
+    expect(parseWorkspaceCommand('Tasks: call the bank', ctx)).toMatchObject({ section: 'actions', text: 'call the bank' });
+    expect(parseWorkspaceCommand('Resumen: todo bien', ctx)).toMatchObject({ section: 'recap', text: 'todo bien' });
+    expect(parseWorkspaceCommand('Actionnaires présents : 5', ctx)).toBeNull();
+    expect(parseWorkspaceCommand('Notez que la salle change', ctx)).toBeNull();
+    expect(parseWorkspaceCommand('Rowan will call', ctx)).toBeNull();
+  });
+  it('en lecture de transcription, exige « : » après le mot-clé', () => {
+    const strict = { ...ctx, strict: true };
+    expect(parseWorkspaceCommand('Action plan was discussed', strict)).toBeNull();
+    expect(parseWorkspaceCommand('Action : réserver le camion', strict)).toMatchObject({ section: 'actions' });
+  });
+  it('retient la dernière échéance de la phrase', () => {
+    expect(parseWorkspaceCommand('Action : confirm by phone before Friday', ctx)).toMatchObject({ text: 'confirm by phone', due: 'Friday' });
+    expect(parseWorkspaceCommand("Action : payer d'ici à jeudi", ctx)).toMatchObject({ text: 'payer', due: 'jeudi' });
+  });
 });

@@ -45,7 +45,7 @@ export class RuleBasedExpertEngine implements ExpertEngine {
   async notes(ctx: ExpertContext): Promise<ExtractedNote[]> {
     const out: ExtractedNote[] = [];
     for (const line of ctx.transcript) {
-      const cmd = parseWorkspaceCommand(line.text, { participantNames: ctx.participants, columnNames: [] });
+      const cmd = parseWorkspaceCommand(line.text, { participantNames: ctx.participants, columnNames: [], strict: true });
       if (cmd?.kind === 'add' && cmd.section !== 'recap') {
         out.push({ section: cmd.section, text: cmd.text, owner: cmd.owner, due: cmd.due });
         continue;

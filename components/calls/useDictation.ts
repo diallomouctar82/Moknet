@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 /**
  * Dictée vocale du navigateur (Web Speech API). `locale` null = langue non
@@ -10,6 +10,8 @@ export const useDictation = (locale: string | null, onText: (text: string) => vo
   const recRef = useRef<any>(null);
   const SR = typeof window !== 'undefined' ? ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition) : null;
   const available = !!SR && !!locale;
+  // Arrêter la reconnaissance si le composant disparaît (fin d'appel, changement d'onglet).
+  useEffect(() => () => { try { recRef.current?.abort?.(); } catch { /* déjà arrêtée */ } }, []);
 
   const toggle = () => {
     if (listening) { recRef.current?.stop(); setListening(false); return; }

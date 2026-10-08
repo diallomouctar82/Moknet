@@ -75,6 +75,7 @@ export const formatDec = (d: Dec, lang: string = 'fr', maxDecimals = 2): string 
 export interface ParsedNumber {
   value: Dec | null;
   ambiguous: boolean;      // ex. "1,500" : 1,5 (fr) ou 1500 (en) ?
+  percent?: boolean;       // "18 %" est lu 0,18
   reason?: string;
 }
 
@@ -87,7 +88,11 @@ const SPACE_CHARS = /[\s\u00a0\u202f]/g;
 export const parseLocaleNumber = (raw: string): ParsedNumber => {
   const trimmed = (raw ?? '').trim();
   if (!trimmed) return { value: null, ambiguous: false, reason: 'vide' };
-  let t = trimmed.replace(/(gnf|fcfa|xof|eur|usd|€|\$|%)/gi, '').replace(SPACE_CHARS, '');
+  const percent = /%\s*$/.test(trimmed);
+  if ((trimmed.match(/%/g) || []).length > (percent ? 1 : 0)) {
+    return { value: null, ambiguous: false, reason: `« ${trimmed} » : symbole % mal placé` };
+  }
+  let t = trimmed.replace(/%\s*$/, '').replace(/(gnf|fcfa|xof|eur|usd|€|\$)/gi, '').replace(SPACE_CHARS, '');
   let sign = 1n;
   if (t.startsWith('-')) { sign = -1n; t = t.slice(1); } else if (t.startsWith('+')) { t = t.slice(1); }
   if (!/^\d[\d.,]*$/.test(t) || /[.,]$/.test(t)) {
@@ -136,7 +141,8 @@ export const parseLocaleNumber = (raw: string): ParsedNumber => {
     return { value: null, ambiguous: false, reason: `« ${trimmed} » n'est pas un nombre` };
   }
   const n = BigInt((intPart || '0') + fracPart) * sign;
-  return { value: normalize({ n, s: fracPart.length }), ambiguous, reason };
+  const value = normalize({ n, s: fracPart.length });
+  return { value: percent ? dec.div(value, dec.fromInt(100)) : value, ambiguous, percent, reason };
 };
 
 // --- Évaluation d'expressions (sans eval) ---------------------------------
@@ -145,9 +151,10 @@ type Tok = { k: 'num'; v: Dec } | { k: 'op'; v: '+' | '-' | '*' | '/' | 'neg' } 
 
 const NUMBER_RE = /^(?:\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)*)/;
 
-const tokenize = (expr: string): { tokens: Tok[]; ambiguous: string[] } => {
+const tokenize = (expr: string): { tokens: Tok[]; ambiguous: string[]; maxScale: number } => {
   const tokens: Tok[] = [];
   const ambiguous: string[] = [];
+  let maxScale = 0;
   let i = 0;
   const src = expr.trim();
   while (i < src.length) {
@@ -158,6 +165,7 @@ const tokenize = (expr: string): { tokens: Tok[]; ambiguous: string[] } => {
       const p = parseLocaleNumber(m[0]);
       if (!p.value) throw new CalcError(p.reason || `Nombre invalide : ${m[0]}`);
       if (p.ambiguous && p.reason) ambiguous.push(p.reason);
+      maxScale = Math.max(maxScale, p.value.s);
       tokens.push({ k: 'num', v: p.value });
       i += m[0].length;
       continue;
@@ -175,37 +183,40 @@ const tokenize = (expr: string): { tokens: Tok[]; ambiguous: string[] } => {
     }
     throw new CalcError(`Caractère inattendu « ${c} »`);
   }
-  return { tokens, ambiguous };
+  return { tokens, ambiguous, maxScale };
 };
 
 const PREC: Record<string, number> = { '+': 1, '-': 1, '*': 2, '/': 2, neg: 3 };
 
-export interface EvalResult { value: Dec; ambiguous: string[] }
+export interface EvalResult { value: Dec; ambiguous: string[]; maxOperandScale: number }
 
 /** Évalue une expression arithmétique (+ - × ÷, parenthèses, pourcentages). */
 export const evaluate = (expr: string): EvalResult => {
-  const { tokens, ambiguous } = tokenize(expr);
+  const { tokens, ambiguous, maxScale } = tokenize(expr);
   if (!tokens.length) throw new CalcError('Expression vide');
-  const out: Dec[] = [];
+  // Chaque opérande retient s'il vient d'un pourcentage : « 200 + 10 % » = 220, comme une calculatrice.
+  const out: Array<{ v: Dec; pct: boolean }> = [];
   const ops: Array<Tok> = [];
   const apply = (op: string) => {
     if (op === 'neg') {
       const a = out.pop(); if (!a) throw new CalcError('Expression incomplète');
-      out.push({ n: -a.n, s: a.s });
+      out.push({ v: { n: -a.v.n, s: a.v.s }, pct: a.pct });
       return;
     }
     const b = out.pop(); const a = out.pop();
     if (!a || !b) throw new CalcError('Expression incomplète');
-    out.push(op === '+' ? dec.add(a, b) : op === '-' ? dec.sub(a, b) : op === '*' ? dec.mul(a, b) : dec.div(a, b));
+    const rhs = (op === '+' || op === '-') && b.pct && !a.pct ? dec.mul(a.v, b.v) : b.v;
+    const v = op === '+' ? dec.add(a.v, rhs) : op === '-' ? dec.sub(a.v, rhs) : op === '*' ? dec.mul(a.v, rhs) : dec.div(a.v, rhs);
+    out.push({ v, pct: false });
   };
   let expectOperand = true;
   for (const t of tokens) {
     if (t.k === 'num') {
       if (!expectOperand) throw new CalcError('Deux nombres se suivent');
-      out.push(t.v); expectOperand = false;
+      out.push({ v: t.v, pct: false }); expectOperand = false;
     } else if (t.k === 'pct') {
       const a = out.pop(); if (!a || expectOperand) throw new CalcError('% mal placé');
-      out.push(dec.div(a, dec.fromInt(100)));
+      out.push({ v: dec.div(a.v, dec.fromInt(100)), pct: true });
     } else if (t.k === 'lp') {
       ops.push(t); expectOperand = true;
     } else if (t.k === 'rp') {
@@ -229,7 +240,7 @@ export const evaluate = (expr: string): EvalResult => {
     apply((top as any).v);
   }
   if (out.length !== 1) throw new CalcError('Expression invalide');
-  return { value: out[0], ambiguous };
+  return { value: out[0].v, ambiguous, maxOperandScale: maxScale };
 };
 
 /** Vrai si `claimed` est un arrondi correct de `computed` à la précision écrite. */
@@ -238,11 +249,20 @@ export const matchesClaim = (computed: Dec, claimed: Dec): boolean => {
   return toCanonical(roundDec(computed, decimals)) === toCanonical(claimed);
 };
 
+/**
+ * exact   : égalité exacte.
+ * rounded : arrondi correct, à une précision suffisante (≥ celle des opérandes et ≥ 2 décimales).
+ * approx  : arrondi correct mais trop grossier (« 0,4 + 0,4 = 1 ») → signalé.
+ * wrong   : résultat faux.  error : expression illisible.
+ */
+export type CalcStatus = 'exact' | 'rounded' | 'approx' | 'wrong' | 'error';
+
 export interface CalcCheck {
   expression: string;
   claimed: string;
   computed: string | null; // canonique
   ok: boolean;
+  status: CalcStatus;
   message: string;
 }
 
@@ -263,18 +283,24 @@ export const verifyInlineCalculations = (text: string): CalcCheck[] => {
     const expression = cleanTail(m[1]).trim();
     const claimedRaw = cleanTail(m[2]).trim();
     try {
-      const { value } = evaluate(expression);
+      const { value, maxOperandScale } = evaluate(expression);
       const claimed = parseLocaleNumber(claimedRaw);
       if (!claimed.value) throw new CalcError(claimed.reason || 'Résultat illisible');
-      const ok = matchesClaim(value, claimed.value);
+      const exact = toCanonical(value) === toCanonical(claimed.value);
+      const rounding = matchesClaim(value, claimed.value);
+      const precise = claimed.value.s >= Math.max(maxOperandScale, 2);
+      const status: CalcStatus = exact ? 'exact' : !rounding ? 'wrong' : precise ? 'rounded' : 'approx';
+      const exactText = formatDec(value, 'fr', 6);
       checks.push({
-        expression, claimed: claimedRaw, computed: toCanonical(value), ok,
-        message: ok
-          ? `Calcul vérifié : ${expression} = ${claimedRaw}`
+        expression, claimed: claimedRaw, computed: toCanonical(value), ok: status === 'exact' || status === 'rounded', status,
+        message:
+          status === 'exact' ? `Calcul vérifié : ${expression} = ${claimedRaw}`
+          : status === 'rounded' ? `Calcul vérifié (arrondi) : ${expression} ≈ ${claimedRaw}, valeur exacte ${exactText}`
+          : status === 'approx' ? `Arrondi trop grossier : ${expression} = ${exactText} (annoncé ${claimedRaw})`
           : `Calcul faux : ${expression} = ${formatDec(value, 'fr')} (et non ${claimedRaw})`,
       });
     } catch (e) {
-      checks.push({ expression, claimed: claimedRaw, computed: null, ok: false, message: `Calcul illisible : ${(e as Error).message}` });
+      checks.push({ expression, claimed: claimedRaw, computed: null, ok: false, status: 'error', message: `Calcul illisible : ${(e as Error).message}` });
     }
   }
   return checks;

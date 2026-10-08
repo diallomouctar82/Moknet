@@ -11,8 +11,8 @@ export type BusMessage =
   | { t: 'intent'; meetingId: string; from: string; reqId: string; intent: MeetingIntent }
   | { t: 'ack'; to: string; reqId: string; version: number }
   | { t: 'error'; to: string; reqId: string; message: string }
-  | { t: 'snapshot'; state: MeetingState }
-  | { t: 'hello'; from: string }
+  | { t: 'snapshot'; from: string; state: MeetingState }
+  | { t: 'hello'; from: string; reply?: boolean }
   | { t: 'signal'; meetingId: string; from: string; to: string; data: any };
 
 export interface Bus {

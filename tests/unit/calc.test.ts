@@ -60,9 +60,17 @@ describe('vérification des calculs écrits dans le texte', () => {
     expect(ko.computed).toBe('4500');
     expect(ko.message).toContain('4 500');
   });
-  it('accepte un arrondi correct à la précision écrite', () => {
-    expect(verifyInlineCalculations('10 / 3 = 3,33')[0].ok).toBe(true);
-    expect(verifyInlineCalculations('10 / 3 = 3,34')[0].ok).toBe(false);
+  it('accepte un arrondi correct à une précision suffisante, signale un arrondi grossier', () => {
+    expect(verifyInlineCalculations('10 / 3 = 3,33')[0]).toMatchObject({ ok: true, status: 'rounded' });
+    expect(verifyInlineCalculations('10 / 3 = 3,34')[0]).toMatchObject({ ok: false, status: 'wrong' });
+    expect(verifyInlineCalculations('0,4 + 0,4 = 1')[0]).toMatchObject({ ok: false, status: 'approx' });
+    expect(verifyInlineCalculations('1/3 = 0')[0]).toMatchObject({ ok: false, status: 'approx' });
+    expect(verifyInlineCalculations('1,50 + 1,50 = 3')[0]).toMatchObject({ ok: true, status: 'exact' });
+  });
+  it('« 200 + 10 % » vaut 220, comme sur une calculatrice', () => {
+    expect(verifyInlineCalculations('200 + 10% = 220')[0]).toMatchObject({ ok: true, status: 'exact' });
+    expect(verifyInlineCalculations('200 - 10% = 180')[0].ok).toBe(true);
+    expect(verifyInlineCalculations('200 * 10% = 20')[0].ok).toBe(true);
   });
   it('ignore les nombres sans égalité', () => {
     expect(verifyInlineCalculations('Réunion le 12, salle 3')).toEqual([]);
@@ -113,6 +121,12 @@ describe('tableau partagé calculé par le logiciel', () => {
     expect(validateColumns([{ name: 'A', type: 'text' }, { name: 'B', type: 'computed', formula: '{A} * 2' }])).toContain('texte');
     expect(validateColumns([{ name: 'A', type: 'number' }, { name: 'a', type: 'number' }])).toContain('même nom');
     expect(validateColumns([{ name: 'A', type: 'number' }, { name: 'B', type: 'computed', formula: '{A} * 2' }])).toBeNull();
+  });
+  it('un pourcentage dans une cellule vaut une fraction (18 % → 0,18)', () => {
+    expect(toCanonical(parseLocaleNumber('18%').value!)).toBe('0.18');
+    expect(toCanonical(parseLocaleNumber('18 %').value!)).toBe('0.18');
+    expect(toCanonical(evaluateFormula('{Montant} * {Taux}', { Montant: '1000', Taux: '18%' }).value!)).toBe('180');
+    expect(parseLocaleNumber('1%8').value).toBeNull();
   });
   it('formule avec valeur négative', () => {
     expect(toCanonical(evaluateFormula('3 * {A}', { A: '-5' }).value!)).toBe('-15');

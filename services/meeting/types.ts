@@ -48,6 +48,8 @@ export interface NoteTakingState {
    * refused   : au moins un refus → rien n'est conservé.
    */
   status: 'off' | 'requested' | 'active' | 'paused' | 'refused';
+  /** Tour de consentement : un résultat d'IA calculé lors d'un tour précédent est ignoré. */
+  round: number;
   requestedBy?: string;
   announcement?: string;
   consents: Record<string, ConsentAnswer>;
@@ -87,6 +89,8 @@ export interface WorkspaceItem {
   createdAt: number;
   updatedAt: number;
   history: Array<{ by: string; at: number; text: string }>;
+  /** Modifié par un participant : un expert IA ne le réécrit plus automatiquement. */
+  humanEdited?: boolean;
 }
 
 export type ColumnType = 'text' | 'number' | 'computed';
@@ -119,7 +123,12 @@ export interface SharedTable {
   rows: TableRow[];
 }
 
-export interface Workspace { items: WorkspaceItem[]; table: SharedTable }
+export interface Workspace {
+  items: WorkspaceItem[];
+  table: SharedTable;
+  /** Éléments supprimés par un participant : un expert IA ne doit pas les reproposer. */
+  dismissed: string[];
+}
 
 export type ApprovalAnswer = 'pending' | 'approved' | 'changes_requested';
 
@@ -204,16 +213,16 @@ export type MeetingIntent =
   | { type: '_CAPTION_TRANSLATED'; captionId: string; translations: Caption['translations'] }
   | { type: '_ITEM_TRANSLATED'; itemId: string; sourceText: string; translations: WorkspaceItem['translations'] }
   | { type: '_EXPERT_ANSWER'; messageId: string; answer?: string; failed?: boolean }
-  | { type: '_EXPERT_NOTES'; expertId: string; items: Array<{ section: WorkspaceSection; text: string; owner?: string; due?: string }> }
-  | { type: '_EXPERT_RECAP'; expertId: string; text: string }
+  | { type: '_EXPERT_NOTES'; expertId: string; round: number; items: Array<{ section: WorkspaceSection; text: string; owner?: string; due?: string }> }
+  | { type: '_EXPERT_RECAP'; expertId: string; round: number; text: string }
   | { type: '_REPORT_PUBLISHED'; reportId: string };
 
 export type MeetingEffect =
   | { type: 'translate'; captionId: string }
   | { type: 'translate_item'; itemId: string }
   | { type: 'expert_answer'; messageId: string }
-  | { type: 'expert_notes'; expertId: string }
-  | { type: 'expert_recap'; expertId: string }
+  | { type: 'expert_notes'; expertId: string; round: number }
+  | { type: 'expert_recap'; expertId: string; round: number }
   | { type: 'publish_report' };
 
 export class MeetingRuleError extends Error {}

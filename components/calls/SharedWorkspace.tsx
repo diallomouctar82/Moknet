@@ -187,8 +187,8 @@ const ItemCard: React.FC<{ item: WorkspaceItem; index: number; meId: string; lan
               {item.authorName}{item.history.length > 0 && ` · modifié ${item.history.length}×`}{item.confirmedBy.length > 0 && ` · confirmé par ${item.confirmedBy.length}`}
             </p>
             {item.calcChecks.map((c, i) => (
-              <p key={i} className={`text-[11px] mt-1 flex items-center gap-1 ${c.ok ? 'text-emerald-700' : 'text-red-700'}`} data-testid="calc-check" data-ok={c.ok ? 'true' : 'false'}>
-                {c.ok ? <CheckCircle2 size={12} /> : <XCircle size={12} />} {c.message}
+              <p key={i} className={`text-[11px] mt-1 flex items-center gap-1 ${c.ok ? 'text-emerald-700' : c.status === 'approx' ? 'text-amber-700' : 'text-red-700'}`} data-testid="calc-check" data-ok={c.ok ? 'true' : 'false'} data-status={c.status}>
+                {c.ok ? <CheckCircle2 size={12} /> : c.status === 'approx' ? <AlertTriangle size={12} /> : <XCircle size={12} />} {c.message}
               </p>
             ))}
             {item.uncertain && (

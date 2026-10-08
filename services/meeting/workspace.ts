@@ -5,10 +5,16 @@ import { evaluateFormula, parseLocaleNumber, dec, toCanonical, Dec, formatDec, m
 import { assessText } from './uncertainty';
 import { ComputedTable, SharedTable, TableColumn, WorkspaceItem, WorkspaceSection } from './types';
 
+export const MAX_TEXT_LENGTH = 2000;   // borne aussi le coût de l'analyse des calculs
+export const MAX_CELL_LENGTH = 200;
+
 export const emptyWorkspace = () => ({
   items: [] as WorkspaceItem[],
   table: { title: 'Tableau', columns: [] as TableColumn[], rows: [] } as SharedTable,
+  dismissed: [] as string[],
 });
+
+export const dedupKey = (section: WorkspaceSection, text: string) => `${section}|${normalizeForDedup(text)}`;
 
 /** (Re)calcule l'état d'incertitude d'un élément à partir de son texte. */
 export const assessItem = (item: WorkspaceItem): WorkspaceItem => {
@@ -32,7 +38,7 @@ export const validateColumns = (columns: Array<Omit<TableColumn, 'id'>>): string
   const names = columns.map(c => c.name.trim());
   if (names.some(n => !n)) return 'Chaque colonne doit avoir un nom';
   if (new Set(names.map(n => n.toLowerCase())).size !== names.length) return 'Deux colonnes portent le même nom';
-  for (const c of columns) {
+  for (const [idx, c] of columns.entries()) {
     if (c.type !== 'computed') continue;
     if (!c.formula) return `La colonne calculée « ${c.name} » n'a pas de formule`;
     const refs = Array.from(c.formula.matchAll(/\{([^}]+)\}/g)).map(m => m[1].trim());
@@ -42,6 +48,7 @@ export const validateColumns = (columns: Array<Omit<TableColumn, 'id'>>): string
       if (!col) return `La formule de « ${c.name} » référence une colonne inconnue « ${r} »`;
       if (col.type === 'text') return `La formule de « ${c.name} » utilise la colonne texte « ${r} »`;
       if (col.name.trim() === c.name.trim()) return `La formule de « ${c.name} » se référence elle-même`;
+      if (columns.indexOf(col) > idx) return `La formule de « ${c.name} » doit utiliser des colonnes placées avant elle (« ${r} » est après)`;
     }
   }
   return null;
