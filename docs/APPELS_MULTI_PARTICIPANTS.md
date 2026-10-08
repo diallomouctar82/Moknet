@@ -16,7 +16,7 @@ comment elle est testée, et ce qui bloque encore la mise en production.
 | Espace partagé : tableau, récapitulatif, décisions, plan d'action | Panneau *Espace partagé*, modifiable par tous, **à l'écrit ou à la voix** (dictée + commandes « Décision : … », « Action : … pour Aminata avant vendredi », « Ligne : Ciment ; 3 ; 1500 », « Corrige décision 2 : … ») | `SharedWorkspace.tsx`, `commandParser.ts` |
 | Informations incertaines signalées | ⚠️ automatique : hésitations (fr/en/es), nombres ambigus (« 1,500 »), calcul faux, contenu proposé par une IA non confirmé | `uncertainty.ts` |
 | Calculs vérifiés par le logiciel | Arithmétique décimale exacte (bigint, sans flottants) ; colonnes calculées non modifiables à la main ; toute égalité écrite (« 3 x 1500 = 4000 ») est recalculée et corrigée | `calc.ts`, `workspace.ts` |
-| Prise de notes annoncée et acceptée par tous | Annonce nominative (qui prend les notes, expert IA compris) ; **rien n'est conservé** tant que chaque présent n'a pas accepté ; un nouvel arrivant met en pause ; un refus annule ; des notes d'IA arrivées après un retrait sont jetées | `meetingCore.ts` (`recomputeConsent`) |
+| Prise de notes annoncée et acceptée par tous | Annonce nominative (qui prend les notes, expert IA compris) ; **rien n'est conservé** tant que chaque présent n'a pas accepté ; un nouvel arrivant met en pause ; un refus annule **et efface la transcription brute** ; la transcription n'est transmise à une IA que pendant un accord actif ; des résultats d'IA d'un tour d'accord précédent sont jetés | `meetingCore.ts` (`recomputeConsent`), `meetingClient.ts` (`expertContext`) |
 | Compte-rendu validé, conservé dans la conversation, visible des seules personnes autorisées | Proposé par un participant, validé par **chaque** présent (ou correction demandée), empreinte de contrôle, publié dans la conversation d'appel avec la liste des lecteurs autorisés | `report.ts`, `conversationStore.ts` |
 
 ### Règles métier principales (toutes testées)
@@ -25,7 +25,10 @@ comment elle est testée, et ce qui bloque encore la mise en production.
 - Un participant **ne peut agir qu'en son propre nom** ; les résultats d'IA ne peuvent être injectés que par l'hôte.
 - **6 personnes maximum** par appel (limite du maillage WebRTC ; au-delà il faut un serveur média).
 - Experts : toujours présentés comme **experts IA** dans un appel de groupe (consentement éclairé). Un conseiller ne reçoit la transcription que si la prise de notes a été acceptée par tous.
-- Quelqu'un qui part **sans avoir validé** le compte-rendu n'y a pas accès ; un arrivant pendant la validation doit valider aussi.
+- Quelqu'un qui part **sans avoir validé** le compte-rendu n'y a pas accès ; un arrivant pendant la validation doit valider aussi ; l'hôte ne peut pas terminer l'appel tant qu'une validation est en attente.
+- Un élément supprimé ou corrigé par un participant n'est jamais reproposé ni écrasé par un expert IA.
+- Changer de vue dans l'application ne raccroche pas : un bandeau permet de revenir à l'appel.
+- Un nouvel arrivant ne voit pas les sous-titres de ce qui a été dit avant son arrivée.
 
 ### Langues réellement prises en charge (`services/meeting/languages.ts`)
 
@@ -64,7 +67,7 @@ Le bouton « Appel de groupe » (icône personnes) est aussi présent à côté 
 
 ```bash
 npm run typecheck      # TypeScript strict sur tout le dépôt
-npm test               # 58 tests unitaires et d'intégration (vitest)
+npm test               # 75 tests unitaires et d'intégration (vitest)
 npm run test:e2e       # 2 scénarios navigateur réels (Playwright + Chromium)
 ```
 
@@ -82,6 +85,8 @@ scénario, client par client, sur bus en mémoire) :
 7. Jean-Pierre **passe l'appel en vidéo** : chaque onglet reçoit 2 flux vidéo distants réellement décodés (largeur > 0, lecture en cours).
 8. Moussa propose le **compte-rendu** ; Aminata et Jean-Pierre valident ; il est publié dans la conversation.
 9. Fin d'appel : le compte-rendu est visible des 3 participants ; **Fatou ne voit ni la conversation ni le compte-rendu**.
+
+Le scénario vérifie aussi qu'un onglet hors de l'appel qui envoie une offre WebRTC ne reçoit aucun flux, et que passer au chat ne coupe pas l'appel.
 
 Second scénario : appel **vidéo d'emblée**, un **refus** d'invitation, un ajout en cours d'appel, un
 conseiller IA interrogé (échec propre sans clé), et départ de l'hôte avec reprise par un autre participant.
@@ -101,8 +106,16 @@ Captures (si `E2E_SHOTS_DIR` est défini) et `evidence.json` (états WebRTC, tex
 - **Experts IA Gemini** (réponses, notes, récap JSON) : code écrit, non exécuté contre l'API réelle.
 - **Dictée vocale** (Web Speech API) : indisponible en navigateur automatisé ; les tests saisissent le texte à la place.
 
+### Revue indépendante (contrôle ≠ production)
+Une revue indépendante du code a relevé 2 défauts bloquants et 11 à corriger, tous corrigés avec un test de non-régression (vérifié en réintroduisant le défaut pour les principaux) :
+fuite de transcription vers l'IA après retrait de l'accord ; « 18 % » lu 18 dans les cellules ; mots-clés de commandes trop gourmands ;
+sous-titres antérieurs à l'arrivée ; état forgé par un non-hôte ; flux média envoyé à un onglet hors appel ; micro laissé ouvert ;
+repli audio sans caméra ; compte-rendu bloqué après fin d'appel ; changement de vue qui raccrochait ; texte très long qui gelait l'hôte ;
+arrondis grossiers déclarés « vérifiés » ; notes IA qui réécrivaient les corrections humaines ; plus des points mineurs
+(reprise par le nouvel hôte, ordre des formules, échéances, « 200 + 10 % », dictée, double identité).
+
 ### Bloqué avant mise en production
-1. **Serveur temps réel** : l'état et la signalisation passent par `BroadcastChannel`, qui ne relie que les onglets d'un même navigateur. Il faut un service WebSocket (ou équivalent) authentifié pour relier des appareils différents — l'interface `Bus` est prête à le recevoir.
+1. **Serveur temps réel authentifié** : l'état et la signalisation passent par `BroadcastChannel`, qui ne relie que les onglets d'un même navigateur, et l'émetteur d'un message y est **déclaratif** (un onglet malveillant peut se faire passer pour un autre participant). Il faut un service WebSocket (ou équivalent) qui authentifie chaque message et n'envoie à chacun que ce qu'il a le droit de voir — l'interface `Bus` est prête à le recevoir.
 2. **Serveur TURN** (et STUN maîtrisé) pour les réseaux mobiles/NAT stricts ; configurable via `VITE_ICE_SERVERS`.
 3. **Contrôle d'accès côté serveur** : la restriction du compte-rendu est aujourd'hui un filtre d'affichage sur `localStorage`. Les comptes-rendus, conversations et l'état d'appel doivent être stockés et filtrés par le serveur (sinon toute personne ayant accès au navigateur peut lire les données brutes). L'état d'appel circule aussi chez un onglet non invité sur le bus de démonstration.
 4. **Annuaire d'utilisateurs et authentification réels** : l'annuaire est de démonstration ; la connexion actuelle de l'application est simulée.
