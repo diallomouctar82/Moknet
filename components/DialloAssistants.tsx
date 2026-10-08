@@ -2,10 +2,11 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ExpertType, ChatMessage } from '../types';
 import { generateResponse, connectLiveSession, decodeAudioData } from '../services/geminiService';
+import { dictationLocale } from '../services/meeting/languages';
 import { 
   Scale, Stethoscope, GraduationCap, Briefcase, 
   Home, Plane, Mic, Send, Image as ImageIcon, MapPin, Search, Brain, X, Loader, Phone, PhoneOff, MicOff, ShieldCheck,
-  Paperclip, Camera, Sparkles, PenTool, Type, Wand2, Landmark, FileText, Globe, AlertCircle, Video
+  Paperclip, Camera, Sparkles, PenTool, Type, Wand2, Landmark, FileText, Globe, AlertCircle, Video, Users
 } from 'lucide-react';
 
 const Experts = [
@@ -34,9 +35,10 @@ const LANGUAGES = [
 interface DialloAssistantsProps {
     userCredits?: number;
     deductCredits?: (amount: number) => boolean;
+    onOpenGroupCall?: () => void;
 }
 
-export const DialloAssistants: React.FC<DialloAssistantsProps> = ({ userCredits = 999, deductCredits = (_: number) => true }) => {
+export const DialloAssistants: React.FC<DialloAssistantsProps> = ({ userCredits = 999, deductCredits = (_: number) => true, onOpenGroupCall }) => {
   const [activeExpert, setActiveExpert] = useState<ExpertType>(ExpertType.DIALLO);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -205,8 +207,14 @@ export const DialloAssistants: React.FC<DialloAssistantsProps> = ({ userCredits 
           alert("Votre navigateur ne supporte pas la dictée vocale.");
           return;
       }
+      const locale = dictationLocale(selectedLanguage);
+      if (!locale) {
+          const name = LANGUAGES.find(l => l.code === selectedLanguage)?.name || selectedLanguage;
+          alert(`La dictée vocale n'est pas disponible en ${name} dans ce navigateur. Vous pouvez écrire votre message.`);
+          return;
+      }
       const recognition = new SpeechRecognition();
-      recognition.lang = selectedLanguage === 'en' ? 'en-US' : 'fr-FR'; 
+      recognition.lang = locale;
       recognition.onstart = () => setIsRecording(true);
       recognition.onend = () => setIsRecording(false);
       recognition.onerror = () => setIsRecording(false);
@@ -245,7 +253,8 @@ export const DialloAssistants: React.FC<DialloAssistantsProps> = ({ userCredits 
         },
         () => {
           endCall();
-        }
+        },
+        LANGUAGES.find(l => l.code === selectedLanguage)?.name
       );
       liveSessionRef.current = sessionPromise;
       setCallStatus('connected');
@@ -575,6 +584,17 @@ export const DialloAssistants: React.FC<DialloAssistantsProps> = ({ userCredits 
           >
             <Phone size={24} />
           </button>
+
+          {onOpenGroupCall && (
+            <button
+              onClick={onOpenGroupCall}
+              className="p-4 rounded-full transition-all shadow-sm bg-emerald-700 text-white hover:bg-emerald-800 hover:scale-105 active:scale-95"
+              title="Appel de groupe (audio ou vidéo, plusieurs personnes et experts)"
+              aria-label="Appel de groupe"
+            >
+              <Users size={24} />
+            </button>
+          )}
 
           <button
             onClick={handleSend}

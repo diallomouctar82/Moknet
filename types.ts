@@ -148,6 +148,7 @@ export interface VoiceModel {
 
 export enum AppView {
   ASSISTANTS = 'ASSISTANTS',
+  CALLS = 'CALLS',
   SOCIAL = 'SOCIAL',
   SCHOOL = 'SCHOOL',
   ADMIN = 'ADMIN'
